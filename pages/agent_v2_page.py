@@ -241,37 +241,137 @@ def _render_input_panel(agent: AgentExecutorV2):
                 st.info(f"已加载图像：{st.session_state.get('v2_image_name', '')}")
 
     else:
-        # 文件夹路径输入
-        folder_path = st.text_input(
-            "📂 文件夹路径",
-            value=st.session_state.get('v2_folder_path', ''),
-            placeholder="例如：C:\\Users\\xxx\\data\\test_images",
-            key="v2_folder_input",
-            help="输入本地文件夹的绝对路径，系统将自动读取其中所有 jpg/png/bmp 图片进行批量检测"
+        # 批量模式：三种输入方式
+        batch_input_type = st.radio(
+            "批量输入方式",
+            options=["📤 上传多张图片", "🎯 使用内置示例图片", "📂 本地文件夹路径"],
+            index=0,
+            key="v2_batch_input_type",
+            horizontal=True,
         )
 
-        if folder_path.strip():
-            st.session_state['v2_folder_path'] = folder_path.strip()
-            # 清除单图模式的状态
-            if 'v2_image_path' in st.session_state:
-                del st.session_state['v2_image_path']
-            # 清除旧的批量检测结果（新文件夹需要重新检测）
-            for key in ['v2_batch_results', 'v2_batch_by_class', 'v2_batch_total_detections']:
-                if key in st.session_state:
-                    del st.session_state[key]
+        if batch_input_type == "📤 上传多张图片":
+            uploaded_files = st.file_uploader(
+                "上传多张图片（按住 Ctrl 多选）",
+                type=['jpg', 'jpeg', 'png', 'bmp'],
+                accept_multiple_files=True,
+                key="v2_batch_upload",
+                help="云端部署时推荐使用此方式，可直接上传图片进行批量检测"
+            )
 
-            # 验证文件夹是否存在
-            if os.path.isdir(folder_path.strip()):
-                # 统计图片数量
-                exts = {'.jpg', '.jpeg', '.png', '.bmp', '.JPG', '.JPEG', '.PNG', '.BMP'}
-                count = sum(1 for f in os.listdir(folder_path.strip())
-                           if os.path.splitext(f)[1] in exts)
-                st.success(f"✅ 文件夹有效，找到 {count} 张图片")
-                st.caption(f"路径：{folder_path.strip()}")
+            if uploaded_files and len(uploaded_files) > 0:
+                # 保存到临时文件夹
+                tmp_batch_dir = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "outputs", "temp",
+                    f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                )
+                os.makedirs(tmp_batch_dir, exist_ok=True)
+
+                saved_count = 0
+                for uf in uploaded_files:
+                    save_path = os.path.join(tmp_batch_dir, uf.name)
+                    with open(save_path, "wb") as f:
+                        f.write(uf.getbuffer())
+                    saved_count += 1
+
+                st.session_state['v2_folder_path'] = tmp_batch_dir
+                # 清除单图状态
+                if 'v2_image_path' in st.session_state:
+                    del st.session_state['v2_image_path']
+                # 清除旧的批量检测结果
+                for key in ['v2_batch_results', 'v2_batch_by_class', 'v2_batch_total_detections']:
+                    if key in st.session_state:
+                        del st.session_state[key]
+
+                st.success(f"✅ 已上传 {saved_count} 张图片")
+                # 显示前几张预览
+                if saved_count <= 6:
+                    cols = st.columns(min(saved_count, 3))
+                    for i, uf in enumerate(uploaded_files[:6]):
+                        cols[i % 3].image(uf, caption=uf.name, width=100)
+                else:
+                    st.caption(f"共 {saved_count} 张图片，在对话框输入「批量检测」开始检测")
+
             else:
-                st.error("❌ 文件夹不存在，请检查路径是否正确")
+                if st.session_state.get('v2_folder_path') and 'temp' in st.session_state.get('v2_folder_path', ''):
+                    st.info(f"已加载批量图片（上次上传）")
+                else:
+                    st.info("💡 上传图片后，在对话框输入「批量检测」即可开始")
+
+        elif batch_input_type == "🎯 使用内置示例图片":
+            sample_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sample_images")
+            if os.path.isdir(sample_dir):
+                exts = {'.jpg', '.jpeg', '.png', '.bmp', '.JPG', '.JPEG', '.PNG', '.BMP'}
+                sample_files = [f for f in os.listdir(sample_dir) if os.path.splitext(f)[1] in exts]
+                count = len(sample_files)
+
+                # 按类型统计
+                types = {}
+                for f in sample_files:
+                    prefix = f.split('_')[0]
+                    types[prefix] = types.get(prefix, 0) + 1
+
+                st.info(f"📊 内置示例数据集：共 **{count} 张** 图片，{len(types)} 类缺陷")
+
+                # 显示各类数量
+                type_cols = st.columns(3)
+                type_names = {
+                    "crazing": "裂纹", "inclusion": "夹杂物", "patches": "斑块",
+                    "pitted": "麻点", "rolled-in": "氧化皮", "scratches": "划痕",
+                }
+                for i, (t, c) in enumerate(sorted(types.items())):
+                    name = type_names.get(t, t)
+                    type_cols[i % 3].metric(name, f"{c} 张")
+
+                if st.button("🚀 使用此数据集开始检测", use_container_width=True, type="primary"):
+                    st.session_state['v2_folder_path'] = sample_dir
+                    if 'v2_image_path' in st.session_state:
+                        del st.session_state['v2_image_path']
+                    for key in ['v2_batch_results', 'v2_batch_by_class', 'v2_batch_total_detections']:
+                        if key in st.session_state:
+                            del st.session_state[key]
+                    st.success("✅ 已选择内置示例数据集，在对话框输入「批量检测」开始")
+                    st.rerun()
+
+                if st.session_state.get('v2_folder_path') == sample_dir:
+                    st.success("✅ 当前已选择内置示例数据集")
+            else:
+                st.warning("⚠️ 内置示例图片目录不存在")
+
         else:
-            st.info("💡 输入文件夹路径后，在对话框输入「批量检测」即可开始")
+            # 本地文件夹路径（仅本地部署时有效）
+            st.warning("⚠️ 此方式仅在本地部署时可用，云端部署无法读取本地文件夹")
+            folder_path = st.text_input(
+                "📂 本地文件夹路径",
+                value=st.session_state.get('v2_folder_path', ''),
+                placeholder="例如：C:\\Users\\xxx\\data\\test_images",
+                key="v2_folder_input",
+                help="仅本地部署可用，云端部署请使用「上传多张图片」或「内置示例图片」"
+            )
+
+            if folder_path.strip():
+                st.session_state['v2_folder_path'] = folder_path.strip()
+                # 清除单图模式的状态
+                if 'v2_image_path' in st.session_state:
+                    del st.session_state['v2_image_path']
+                # 清除旧的批量检测结果（新文件夹需要重新检测）
+                for key in ['v2_batch_results', 'v2_batch_by_class', 'v2_batch_total_detections']:
+                    if key in st.session_state:
+                        del st.session_state[key]
+
+                # 验证文件夹是否存在
+                if os.path.isdir(folder_path.strip()):
+                    # 统计图片数量
+                    exts = {'.jpg', '.jpeg', '.png', '.bmp', '.JPG', '.JPEG', '.PNG', '.BMP'}
+                    count = sum(1 for f in os.listdir(folder_path.strip())
+                               if os.path.splitext(f)[1] in exts)
+                    st.success(f"✅ 文件夹有效，找到 {count} 张图片")
+                    st.caption(f"路径：{folder_path.strip()}")
+                else:
+                    st.error("❌ 文件夹不存在，请检查路径是否正确")
+            else:
+                st.info("💡 输入文件夹路径后，在对话框输入「批量检测」即可开始")
 
     st.markdown("---")
 
