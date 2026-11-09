@@ -1,0 +1,61 @@
+# 环境变量与密钥
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# Node.js
+node_modules/
+package-lock.json
+package.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# 数据集（太大，不上传）
+data/raw/
+data/processed/
+NEU-DET/
+NEU-DET.zip
+NEU-CLS.rar
+*.zip
+*.rar
+
+# 训练输出（模型已单独放到 models/weights/）
+outputs/
+runs/
+
+# 临时文件
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+
+# 演示文稿（大文件）
+*.pptx
+*.ppt
+*.docx
+*.doc
+
+# Streamlit
+.streamlit/secrets.toml
+
+# 其他
+.trae-html-share-packages/
+.trae/
+scripts/
+notebooks/

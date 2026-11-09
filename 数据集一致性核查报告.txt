@@ -1,0 +1,440 @@
+================================================================================
+        NEU-CLS 与 NEU-DET 数据集一致性核查报告
+================================================================================
+核查日期: 2026-11-05
+工作目录: c:\Users\User\Desktop\YOLO
+核查方式: Python 脚本实际读取文件、统计数据，无猜测
+
+================================================================================
+一、数据集名称与结构
+================================================================================
+
+1.1 NEU-CLS 数据集
+------------------
+路径: data/raw/NEU-CLS/
+文件总数: 1800 张 JPG 图像
+类别数量: 6 类，每类 300 张
+  - crazing:       300 张
+  - inclusion:     300 张
+  - patches:       300 张
+  - pitted_surface: 300 张
+  - rolled-in_scale: 300 张
+  - scratches:     300 张
+
+命名规律: {类别名}_{4位零填充编号}.jpg
+  例: crazing_0001.jpg, inclusion_0300.jpg
+编号范围: 每类 0001-0300，连续无缺失
+
+图像尺寸: 200x200 像素
+颜色模式: L (灰度单通道)
+数据来源: NEU-CLS.rar (分类任务数据集)
+
+1.2 NEU-DET 数据集
+------------------
+原始数据路径: data/raw/NEU-DET/
+目录结构:
+  - IMAGES/       : 1770 张 JPG 图像
+  - ANNOTATIONS/  : 1770 个 XML 标注文件 (PASCAL VOC 格式)
+
+【重要发现】原始 NEU-DET 只有 1770 张，不是 1800 张！
+各类别数量及缺失编号:
+  - crazing:       295 张 (缺失: 151, 153, 166, 240, 241)
+  - inclusion:     296 张 (缺失: 161, 169, 195, 263)
+  - patches:       295 张 (缺失: 28, 63, 128, 151, 274)
+  - pitted_surface: 294 张 (缺失: 18, 64, 110, 125, 175, 249)
+  - rolled-in_scale: 295 张 (缺失: 14, 80, 138, 176, 216)
+  - scratches:     295 张 (缺失: 86, 195, 264, 286, 300)
+  合计缺失: 30 张
+
+命名规律: {类别名}_{无零填充编号}.jpg
+  例: crazing_1.jpg, inclusion_300.jpg
+
+图像尺寸: 200x200 像素
+颜色模式: RGB (三通道，但三通道值完全相同，本质是伪彩色灰度图)
+
+标注格式: PASCAL VOC XML
+  - 每个图像对应一个 .xml 文件
+  - 包含 <size> (宽高)、<object> (类别+边界框)
+  - 边界框格式: xmin, ymin, xmax, ymax (像素坐标)
+
+原始标注框总数: 4126 个
+  - crazing: 683 个
+  - inclusion: 875 个
+  - patches: 858 个
+  - pitted_surface: 479 个
+  - rolled-in_scale: 620 个
+  - scratches: 611 个
+
+1.3 NEU-CLS 与 NEU-DET 图像对比
+--------------------------------
+图像数量:
+  - NEU-CLS: 1800 张
+  - NEU-DET 原始: 1770 张
+  - 理论上 NEU-DET 应该也是 1800 张（与 NEU-CLS 同图像，外加标注）
+
+类别-编号对交集: 1770 对完全匹配
+  - 两个数据集的图像内容相同，只是 NEU-DET 少了 30 张
+  - NEU-CLS 有但 NEU-DET 没有的 30 张，恰好是上面列出的缺失编号
+
+命名格式差异:
+  - NEU-CLS: 4位零填充 (crazing_0001.jpg)
+  - NEU-DET: 无零填充 (crazing_1.jpg)
+  - 编号含义相同，只是格式不同
+
+颜色模式差异:
+  - NEU-CLS: L (单通道灰度)
+  - NEU-DET: RGB (三通道，但 R=G=B，是伪彩色)
+  - 像素内容一致，只是存储方式不同
+
+================================================================================
+二、标注格式与转换
+================================================================================
+
+2.1 原始标注格式
+----------------
+格式: PASCAL VOC XML
+位置: data/raw/NEU-DET/ANNOTATIONS/
+文件数: 1770 个 .xml 文件
+
+XML 结构样例 (crazing_1.xml):
+  <annotation>
+    <filename>crazing_1.jpg</filename>
+    <size>
+      <width>200</width><height>200</height><depth>1</depth>
+    </size>
+    <object>
+      <name>crazing</name>
+      <bndbox><xmin>2</xmin><ymin>2</ymin><xmax>193</xmax><ymax>194</ymax></bndbox>
+    </object>
+  </annotation>
+
+2.2 转换脚本
+------------
+脚本位置: scripts/convert_neudet.py
+功能: 将 VOC XML 标注转换为 YOLO txt 格式
+转换逻辑:
+  - 读取 XML 中的 bndbox (xmin, ymin, xmax, ymax)
+  - 转换为归一化中心坐标 (x_center, y_center, width, height)
+  - 类别名 -> 类别索引映射 (按 CLASS_NAMES 列表顺序)
+
+类别映射:
+  0 -> crazing
+  1 -> inclusion
+  2 -> patches
+  3 -> pitted_surface
+  4 -> rolled-in_scale
+  5 -> scratches
+
+类别名处理: 脚本中有容错逻辑（小写化、空格转下划线、模糊匹配），
+但实际 NEU-DET 的 XML 中类别名与 CLASS_NAMES 完全一致。
+
+YOLO 标注样例 (crazing_1.txt):
+  0 0.487500 0.490000 0.955000 0.960000
+  格式: class_id x_center y_center width height (均归一化到 [0,1])
+
+2.3 数据划分方式
+----------------
+convert_neudet.py 默认划分比例:
+  train: 70%, val: 20%, test: 10%
+随机种子: seed=42
+
+注意: 实际项目中存在多个不同划分的 YOLO 格式数据集（见第三节）。
+
+================================================================================
+三、数据划分与训练匹配
+================================================================================
+
+3.1 项目中存在的 YOLO 格式数据集
+---------------------------------
+项目中存在至少 5 个 YOLO 格式数据集，划分各不相同：
+
+数据集名称                     train   val   test   总计   划分比例
+-----------------------------  ------  ----  -----  -----  ----------
+yolo_format                    1260    360   180    1800   70/20/10
+neudet_official_yolo           1260    270   270    1800   70/15/15
+neudet_yolo_real               1239    354   177    1770   70/20/10
+neudet_yolo_gan_mixed          2061    354   177    2592   79.5/13.7/6.8
+yolo_gan_mixed                 (未详细统计)
+
+3.2 baseline 训练使用的数据集
+-----------------------------
+训练配置: outputs/baseline/yolov8s_baseline-2/args.yaml
+数据配置: data/processed/neudet_official_yolo/data.yaml
+模型: yolov8s.pt
+epochs: 200 (实际训练 162 个 epoch，因 early stopping 终止)
+patience: 30
+batch: 24
+imgsz: 640
+
+neudet_official_yolo 数据集划分:
+  train: 1260 张 (70%)
+  val:   270 张 (15%)
+  test:  270 张 (15%)
+
+3.3 数据集划分重叠问题（严重不一致）
+-------------------------------------
+yolo_format 与 neudet_official_yolo 的划分完全不同，存在大量跨 split 重叠：
+
+  yolo_format/train 与 neudet_official_yolo/train 交集: 886 张
+  yolo_format/train 与 neudet_official_yolo/val   重叠: 188 张
+  yolo_format/train 与 neudet_official_yolo/test  重叠: 186 张
+  yolo_format/val   与 neudet_official_yolo/train 重叠: 258 张
+  yolo_format/val   与 neudet_official_yolo/val   交集: 51 张
+  yolo_format/val   与 neudet_official_yolo/test  重叠: 51 张
+  yolo_format/test  与 neudet_official_yolo/train 重叠: 116 张
+  yolo_format/test  与 neudet_official_yolo/val   重叠: 31 张
+  yolo_format/test  与 neudet_official_yolo/test  交集: 33 张
+
+【严重问题】如果用 yolo_format 的训练集训练，再用 neudet_official_yolo 的 val/test
+评估，会有大量训练数据泄露到验证/测试集中，导致结果虚高。
+
+3.4 neudet_official_yolo 多出 30 张图像来源不明
+------------------------------------------------
+原始 NEU-DET 只有 1770 张图像，但 neudet_official_yolo 有 1800 张。
+多出的 30 张恰好是原始数据中缺失的那些编号：
+  - crazing: 151, 153, 166, 240, 241 (5张)
+  - inclusion: 161, 169, 195, 263 (4张)
+  - patches: 28, 63, 128, 151, 274 (5张)
+  - pitted_surface: 18, 64, 110, 125, 175, 249 (6张)
+  - rolled-in_scale: 14, 80, 138, 176, 216 (5张)
+  - scratches: 86, 195, 264, 286, 300 (5张)
+
+推测: neudet_official_yolo 数据来自 NEU-CLS（1800张完整数据），
+然后用某种方式（可能是 NEU-CLS 图像 + 官方 GitHub 下载的标注）生成了标签。
+这 30 张图像的标注框来源需要进一步验证。
+
+标注框数量对比:
+  原始 NEU-DET XML:    4126 个标注框
+  neudet_official_yolo: 4189 个标注框
+  差异: +63 个（来自多出的 30 张图像）
+
+================================================================================
+四、results.csv 分析 (yolov8s_baseline-2)
+================================================================================
+
+4.1 训练概况
+------------
+总 epoch 数: 162 (配置 200，early stopping 提前终止)
+训练数据: neudet_official_yolo (train 集 1260 张)
+验证数据: neudet_official_yolo (val 集 270 张)
+
+4.2 各指标最大值（val 集上）
+----------------------------
+指标               最大值    对应 epoch
+-----------------  -------   ----------
+Precision          78.68%    epoch 145
+Recall             77.01%    epoch 125
+mAP50              77.41%    epoch 125
+mAP50-95           42.76%    epoch 132
+
+4.3 best.pt 的选取
+------------------
+Ultralytics YOLO 默认基于 val 集的 mAP50-95 选取 best.pt。
+mAP50-95 最大值: 42.76% at epoch 132
+所以 best.pt 对应 epoch 132 的权重。
+
+保存的权重文件:
+  - best.pt (基于 val mAP50-95 最佳)
+  - last.pt (最后一个 epoch)
+  - epoch0/20/40/60/80/100/120/140/160.pt (按 save_period=20 保存)
+
+4.4 最后 5 个 epoch 的指标
+--------------------------
+  epoch 158: mAP50=76.05%, mAP50-95=42.03%
+  epoch 159: mAP50=75.87%, mAP50-95=42.11%
+  epoch 160: mAP50=75.19%, mAP50-95=41.22%
+  epoch 161: mAP50=74.32%, mAP50-95=41.16%
+  epoch 162: mAP50=75.55%, mAP50-95=41.45%
+
+（性能在后期下降，符合 early stopping 触发条件）
+
+================================================================================
+五、88.97% 来源核查
+================================================================================
+
+5.1 88.97% 不是 baseline 模型的结果
+------------------------------------
+baseline (yolov8s_baseline-2) 在 val 集上的最大 mAP50 仅为 77.41%，
+远低于 88.97%。在 results.csv 中搜索不到接近 0.8897 的值。
+
+5.2 88.97% 是 GAN 增强模型的结果
+---------------------------------
+来源文件: outputs/final_experiments/all_results.json
+  gan_enhanced.map50 = 0.8896841508535175 = 88.97%
+
+模型路径: outputs/yolo_runs/yolov8s_neudet_gan/weights/best.pt
+
+完整指标 (GAN 增强模型):
+  mAP@0.5:     88.97%
+  mAP@0.5:0.95: 65.69%
+  Precision:   84.29%
+  Recall:      86.04%
+
+Baseline 对比 (同测试集):
+  mAP@0.5:     76.35%
+  mAP@0.5:0.95: 41.22%
+
+5.3 88.97% 是 TEST 集上的结果，不是 val 集
+-------------------------------------------
+评估脚本: scripts/step04_experiments.py
+评估函数: evaluate_model(model_path, split='test')
+数据集配置: data/processed/neudet_official_yolo/data.yaml
+
+baseline 评估: split='test' -> mAP50 = 76.35%
+GAN 评估:     split='test' -> mAP50 = 88.97%
+
+【重要发现】88.97% 是在 TEST 集上评估的结果，不是训练过程中的 val 集结果。
+results.csv 中的 metrics 全部来自 val 集，与最终报告的 test 指标不同体系。
+
+5.4 88.97% 在项目中的引用位置
+------------------------------
+- scripts/generate_final_report.py:527  (YOLOv8s + cDCGAN 增强)
+- README.md:225                        (结果表格)
+- 使用说明.md:223                       (mAP50 对比)
+- outputs/final_log.txt:60             (GAN mAP@0.5)
+- outputs/step04_log.txt:17,52          (实验日志)
+- outputs/step05_log.txt:6,14           (报告生成日志)
+- P1_DELIVERY.md:116                    (交付清单中提及为硬编码值)
+
+5.5 GAN 模型训练信息缺失
+-------------------------
+GAN 模型目录: outputs/yolo_runs/yolov8s_neudet_gan/
+存在的文件: weights/best.pt, weights/last.pt, weights/best.onnx
+缺失的文件:
+  - args.yaml  (训练参数配置)
+  - results.csv (训练过程指标曲线)
+  - 训练日志
+
+无法确认 GAN 模型使用的训练数据集、超参数、训练 epoch 数等关键信息。
+推测使用的是 neudet_yolo_gan_mixed 数据集（混合了真实数据和 GAN 生成数据）。
+
+================================================================================
+六、最终测试使用的划分
+================================================================================
+
+6.1 各评估脚本的 split 设置
+----------------------------
+scripts/evaluate.py:
+  model.val(split='val')  -> 默认使用 val 集
+
+scripts/step04_experiments.py:
+  evaluate_model(baseline_model, split='test')  -> baseline 用 test 集
+  evaluate_model(gan_model, split='test')       -> GAN模型用 test 集
+
+6.2 最终报告使用的是 test 集结果
+--------------------------------
+all_results.json 中的 baseline 和 gan_enhanced 结果
+均来自 step04_experiments.py，使用 split='test'。
+
+测试集大小 (neudet_official_yolo):
+  test 集: 270 张图像，630 个标注框
+  各类别测试样本数:
+    crazing: ~45 张
+    inclusion: ~45 张
+    patches: ~45 张
+    pitted_surface: ~45 张
+    rolled-in_scale: ~45 张
+    scratches: ~45 张
+
+6.3 data.yaml 中的划分定义
+---------------------------
+所有 data.yaml 都定义了 train/val/test 三个划分：
+  neudet_official_yolo/data.yaml:
+    path: . (相对路径)
+    train: train/images
+    val: val/images
+    test: test/images
+
+  yolo_format/data.yaml:
+    path: C:\Users\User\Desktop\YOLO\data\processed\yolo_format (绝对路径)
+    train: train/images
+    val: val/images
+    test: test/images
+
+6.4 测试集是否独立
+-------------------
+neudet_official_yolo 中 train/val/test 三集合互不相交（同一数据集内）。
+但不同数据集之间的划分存在大量重叠（见 3.3 节）。
+
+================================================================================
+七、发现的全部不一致问题汇总
+================================================================================
+
+【严重级别】
+-----------
+1. NEU-DET 原始数据只有 1770 张，但 neudet_official_yolo 有 1800 张，
+   多出的 30 张图像来源不明，其标注框的真实性存疑。
+   多出的标注框共 63 个。
+
+2. 项目中存在 5 个 YOLO 格式数据集，划分各不相同，且存在大量跨数据集
+   split 重叠。如果混淆使用会导致数据泄露，结果不可信。
+   例如: yolo_format/train 与 neudet_official_yolo/val 重叠 188 张。
+
+3. 88.97% 是 test 集上的结果，但报告和文档中未明确标注是 test 集。
+   容易与 results.csv 中的 val 集指标混淆。
+
+【重要级别】
+-----------
+4. 存在 5 个 YOLO 格式数据集：
+   yolo_format, neudet_official_yolo, neudet_yolo_real,
+   neudet_yolo_gan_mixed, yolo_gan_mixed
+   划分比例、图像数量、命名格式各不相同，容易混淆。
+
+5. GAN 增强模型 (yolov8s_neudet_gan) 缺少 args.yaml 和 results.csv，
+   无法验证训练配置、数据集、超参数等关键信息，可复现性差。
+
+6. NEU-CLS 图像是灰度图 (mode=L)，NEU-DET 图像是伪彩色 RGB，
+   虽然像素值相同，但存储格式不同，可能导致预处理行为差异。
+
+7. baseline 的 val 集最佳 mAP50=77.41%，但 test 集 mAP50=76.35%，
+   两者不一致，分别来自不同的数据集划分。
+
+8. baseline 模型 (yolov8s_baseline-2) 训练用 neudet_official_yolo，
+   而 configs/yolo_config.yaml 中配置的是 data/processed/yolo_format，
+   配置文件与实际训练使用的数据集不一致。
+
+【一般级别】
+-----------
+9. baseline-2 配置 epochs=200，实际训练 162 个 epoch
+   (early stopping 触发, patience=30)
+
+10. 不同数据集划分比例不同：
+    yolo_format: 70/20/10
+    neudet_official_yolo: 70/15/15
+
+11. data.yaml 路径设置不一致：
+    neudet_official_yolo: path: '.' (相对路径)
+    yolo_format: path 为绝对路径
+
+12. 文件名命名格式不统一：
+    NEU-CLS / yolo_format: 4位零填充 (crazing_0001.jpg)
+    NEU-DET / neudet_official_yolo: 无零填充 (crazing_1.jpg)
+
+13. NEU-DET.zip 压缩包仍保留在项目根目录，data/raw/NEU-DET/ 已解压，
+    存在冗余。
+
+================================================================================
+八、关键数据速查表
+================================================================================
+
+项目                     值
+-----------------------  -------------------------------------------
+NEU-CLS 图像数           1800 (6类 x 300)
+NEU-DET 原始图像数       1770 (缺30张)
+neudet_official_yolo     1800 (多出30张来源不明)
+baseline val mAP50       77.41% (epoch 125)
+baseline val mAP50-95    42.76% (epoch 132)
+baseline test mAP50      76.35% (来自 all_results.json)
+GAN test mAP50           88.97% (来自 all_results.json)
+GAN test mAP50-95        65.69%
+88.97% 对应的数据集      neudet_official_yolo
+88.97% 对应的划分        test 集
+88.97% 对应的指标        mAP@0.5
+best.pt 选取指标         val mAP50-95
+baseline 训练 epoch 数   162 (配置200, early stopping)
+YOLO 格式数据集数量      5 个
+类别数                   6 类
+
+================================================================================
+报告结束
+================================================================================

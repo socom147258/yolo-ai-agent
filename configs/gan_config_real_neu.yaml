@@ -1,0 +1,52 @@
+# GAN Configuration for real NEU-DET dataset
+
+project:
+  name: "DefectGAN_RealNEU"
+  output_dir: "outputs"
+  seed: 42
+
+data:
+  dataset: "NEU"
+  data_dir: "data/raw/NEU-DET/IMAGES"
+  processed_dir: "data/processed"
+  image_size: 64
+  channels: 1
+  num_classes: 6
+  class_names: ["crazing", "inclusion", "patches", "pitted_surface", "rolled-in_scale", "scratches"]
+  train_ratio: 0.8
+  num_workers: 2
+
+dcgan:
+  latent_dim: 100
+  g_feature_maps: 64
+  d_feature_maps: 64
+  batch_size: 128
+  epochs: 150
+  lr: 0.0002
+  beta1: 0.5
+  beta2: 0.999
+  label_smoothing: 0.9
+  save_interval: 25
+  sample_interval: 5
+  num_samples: 64
+
+cdgan:
+  use_cdgan: false
+  global_d_feature_maps: 64
+  local_d_feature_maps: 64
+  local_patch_size: 32
+  lambda_global: 1.0
+  lambda_local: 1.0
+  lambda_recon: 0.1
+  batch_size: 64
+  epochs: 200
+  lr: 0.0002
+  beta1: 0.5
+  beta2: 0.999
+  save_interval: 30
+  sample_interval: 10
+
+generation:
+  num_generate_per_class: 300
+  output_format: "jpg"
+  save_dir: "data/processed/neudet_gan_generated"

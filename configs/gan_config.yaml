@@ -1,0 +1,64 @@
+# GAN Data Augmentation Configuration
+# DCGAN / CDGAN for industrial defect image synthesis
+
+project:
+  name: "DefectGAN"
+  output_dir: "outputs"
+  seed: 42
+
+data:
+  # Dataset: "NEU" (NEU surface defect dataset) or "MVTec" (MVTec AD)
+  dataset: "NEU"
+  data_dir: "data/raw/NEU-CLS"
+  processed_dir: "data/processed"
+  image_size: 64         # Generated image size (64x64 or 128x128)
+  channels: 1            # 1 for grayscale (NEU), 3 for RGB (MVTec)
+  num_classes: 6         # Number of defect classes (NEU: 6 classes)
+  # Class names for NEU dataset
+  class_names: ["crazing", "inclusion", "patches", "pitted_surface", "rolled-in_scale", "scratches"]
+  train_ratio: 0.8
+  num_workers: 4
+
+dcgan:
+  # Generator
+  latent_dim: 100        # Dimension of latent vector z
+  g_feature_maps: 64     # Generator feature map size
+  # Discriminator
+  d_feature_maps: 64     # Discriminator feature map size
+  # Training
+  batch_size: 64
+  epochs: 200
+  lr: 0.0002
+  beta1: 0.5             # Adam optimizer beta1
+  beta2: 0.999
+  label_smoothing: 0.9   # One-sided label smoothing
+  save_interval: 20      # Save checkpoint every N epochs
+  sample_interval: 5     # Generate samples every N epochs
+  num_samples: 64        # Number of samples to generate
+
+cdgan:
+  # CDGAN (Contextual Discriminator GAN) - dual discriminator structure
+  use_cdgan: false       # Set to true to use CDGAN instead of DCGAN
+  # Global discriminator
+  global_d_feature_maps: 64
+  # Local discriminator (evaluates defect regions specifically)
+  local_d_feature_maps: 64
+  local_patch_size: 32   # Patch size for local discriminator
+  # Loss weights
+  lambda_global: 1.0     # Weight for global adversarial loss
+  lambda_local: 1.0      # Weight for local adversarial loss
+  lambda_recon: 0.1      # Weight for reconstruction loss (L1)
+  # Training
+  batch_size: 32
+  epochs: 300
+  lr: 0.0002
+  beta1: 0.5
+  beta2: 0.999
+  save_interval: 30
+  sample_interval: 10
+
+generation:
+  # Post-training generation parameters
+  num_generate_per_class: 500   # Number of images to generate per class
+  output_format: "jpg"
+  save_dir: "data/processed/gan_generated"
