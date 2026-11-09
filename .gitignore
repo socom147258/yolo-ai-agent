@@ -39,6 +39,11 @@ NEU-CLS.rar
 outputs/
 runs/
 
+# 预训练权重（只保留微调后的 best.pt）
+yolov8*.pt
+weights/
+!models/weights/
+
 # 临时文件
 *.tmp
 *.log

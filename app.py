@@ -495,6 +495,42 @@ except Exception:
     st.sidebar.warning("⚠️ 模型加载失败")
 
 st.sidebar.markdown("---")
+
+# 📥 测试图片下载
+sample_dir = os.path.join(BASE_DIR, "sample_images")
+if os.path.isdir(sample_dir):
+    st.sidebar.markdown("📥 **测试图片下载**")
+    st.sidebar.caption("点击下载各类缺陷示例图片，用于上传测试")
+    
+    sample_files = sorted([f for f in os.listdir(sample_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+    defect_names = {
+        "crazing": "裂纹 (Crazing)",
+        "inclusion": "夹杂物 (Inclusion)",
+        "patches": "斑块 (Patches)",
+        "pitted_surface": "麻点 (Pitted Surface)",
+        "rolled-in_scale": "氧化皮 (Rolled-in Scale)",
+        "scratches": "划痕 (Scratches)",
+    }
+    
+    for fname in sample_files:
+        fpath = os.path.join(sample_dir, fname)
+        # 从文件名提取缺陷类型
+        defect_type = fname.rsplit('_', 1)[0] if '_' in fname else fname
+        label = defect_names.get(defect_type, defect_type)
+        try:
+            with open(fpath, "rb") as f:
+                st.sidebar.download_button(
+                    label=f"⬇️ {label}",
+                    data=f.read(),
+                    file_name=fname,
+                    mime="image/jpeg",
+                    key=f"sample_{fname}",
+                    use_container_width=True,
+                )
+        except Exception:
+            pass
+
+st.sidebar.markdown("---")
 st.sidebar.info(
     "**系统说明**\n\n"
     "本系统基于 cDCGAN + YOLOv8 + AI Agent 构建，"
