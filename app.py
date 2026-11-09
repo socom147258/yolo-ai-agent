@@ -496,39 +496,81 @@ except Exception:
 
 st.sidebar.markdown("---")
 
-# 📥 测试图片下载
+# 📥 测试图片下载（按缺陷类型分组）
 sample_dir = os.path.join(BASE_DIR, "sample_images")
 if os.path.isdir(sample_dir):
     st.sidebar.markdown("📥 **测试图片下载**")
-    st.sidebar.caption("点击下载各类缺陷示例图片，用于上传测试")
+    st.sidebar.caption("100 张示例图片，6 类缺陷，点击展开下载")
     
     sample_files = sorted([f for f in os.listdir(sample_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+    
+    # 按缺陷类型分组
+    defect_groups = {}
     defect_names = {
-        "crazing": "裂纹 (Crazing)",
-        "inclusion": "夹杂物 (Inclusion)",
-        "patches": "斑块 (Patches)",
-        "pitted_surface": "麻点 (Pitted Surface)",
-        "rolled-in_scale": "氧化皮 (Rolled-in Scale)",
-        "scratches": "划痕 (Scratches)",
+        "crazing": ("裂纹", "Crazing"),
+        "inclusion": ("夹杂物", "Inclusion"),
+        "patches": ("斑块", "Patches"),
+        "pitted": ("麻点", "Pitted Surface"),
+        "rolled-in": ("氧化皮", "Rolled-in Scale"),
+        "scratches": ("划痕", "Scratches"),
     }
     
     for fname in sample_files:
-        fpath = os.path.join(sample_dir, fname)
-        # 从文件名提取缺陷类型
-        defect_type = fname.rsplit('_', 1)[0] if '_' in fname else fname
-        label = defect_names.get(defect_type, defect_type)
-        try:
-            with open(fpath, "rb") as f:
-                st.sidebar.download_button(
-                    label=f"⬇️ {label}",
-                    data=f.read(),
-                    file_name=fname,
-                    mime="image/jpeg",
-                    key=f"sample_{fname}",
-                    use_container_width=True,
-                )
-        except Exception:
-            pass
+        # 提取缺陷类型前缀（第一个下划线前的部分）
+        prefix = fname.split('_')[0]
+        if prefix not in defect_groups:
+            defect_groups[prefix] = []
+        defect_groups[prefix].append(fname)
+    
+    # 生成打包 ZIP（如果不存在）
+    import zipfile
+    import io
+    
+    zip_path = os.path.join(sample_dir, "all_samples.zip")
+    
+    for prefix in sorted(defect_groups.keys()):
+        files = defect_groups[prefix]
+        cn_name, en_name = defect_names.get(prefix, (prefix, prefix))
+        count = len(files)
+        
+        with st.sidebar.expander(f"📁 {cn_name} ({en_name}) - {count} 张"):
+            # 打包下载按钮
+            zip_bytes = io.BytesIO()
+            with zipfile.ZipFile(zip_bytes, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for fname in files:
+                    fpath = os.path.join(sample_dir, fname)
+                    zf.write(fpath, arcname=fname)
+            zip_bytes.seek(0)
+            
+            st.download_button(
+                label=f"📦 全部下载 ({count}张)",
+                data=zip_bytes.getvalue(),
+                file_name=f"{prefix}_{count}张.zip",
+                mime="application/zip",
+                key=f"zip_{prefix}",
+                use_container_width=True,
+            )
+            
+            st.markdown("---")
+            
+            # 前 5 张单独下载
+            for fname in files[:5]:
+                fpath = os.path.join(sample_dir, fname)
+                try:
+                    with open(fpath, "rb") as f:
+                        st.download_button(
+                            label=f"⬇️ {fname}",
+                            data=f.read(),
+                            file_name=fname,
+                            mime="image/jpeg",
+                            key=f"sample_{fname}",
+                            use_container_width=True,
+                        )
+                except Exception:
+                    pass
+            
+            if count > 5:
+                st.caption(f"... 还有 {count - 5} 张，点击上方全部下载")
 
 st.sidebar.markdown("---")
 st.sidebar.info(
