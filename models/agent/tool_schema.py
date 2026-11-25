@@ -546,7 +546,10 @@ register_tool(ToolSchema(
     display_name='批次缺陷分布',
     description='基于已有的批量检测结果，统计各类缺陷的数量和占比分布',
     category='analysis',
-    params=[],
+    params=[
+        ToolParamSchema('target_class', 'str', default='',
+                        description='仅统计指定的缺陷类别，空值表示全部类别'),
+    ],
     returns=['total_detections', 'by_class', 'by_class_pct', 'top_class', 'summary'],
     timeout_sec=5,
 ))

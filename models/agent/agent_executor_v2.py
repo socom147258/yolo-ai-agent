@@ -204,8 +204,9 @@ class AgentExecutorV2:
         )
 
         # 2. 确定执行模式
-        use_llm = self._can_use_llm()
-        if not use_llm:
+        scoped_batch = folder_path and '只看' in user_input and '整批' in user_input
+        use_llm = self._can_use_llm() and not scoped_batch
+        if not use_llm and not scoped_batch:
             trace.llm_unavailable_fallback = True
 
         # 3. 执行
@@ -230,6 +231,10 @@ class AgentExecutorV2:
 
         if ctx.has_raw_detections and ctx.image and ctx.image.image_path == image_path:
             result['quality_evaluation'] = self.quality_engine.evaluate(ctx)
+            result['context_snapshot']['current_detections'] = [
+                asdict(item) for item in ctx.get_current_detections()
+            ]
+            result['context_snapshot']['image_name'] = ctx.image.image_name
             result['image_evidence'] = {
                 'image': asdict(ctx.image),
                 'detections': [asdict(item) for item in ctx.get_raw_detections()],
@@ -1352,7 +1357,8 @@ class AgentExecutorV2:
                 'folder_path': folder_path,
                 'total_detections': total_det,
                 'by_class_total': by_class,
-                'results': cached_results[:20],
+                'results': [{k: v for k, v in row.items() if k not in ('detections', 'quality_evaluation')}
+                            for row in cached_results[:20]],
                 'has_more': len(cached_results) > 20,
                 'total_results': len(cached_results),
                 'cached': True,
@@ -1402,6 +1408,8 @@ class AgentExecutorV2:
                     'score': eval_result.get('score', 0),
                     'inference_time_ms': detection['inference_time_ms'],
                     'reasons_review': eval_result.get('reasons_review', []),
+                    'detections': [asdict(item) for item in detections],
+                    'quality_evaluation': eval_result,
                 })
             except Exception as e:
                 results.append({
@@ -1424,7 +1432,8 @@ class AgentExecutorV2:
             'folder_path': folder_path,
             'total_detections': total_detections,
             'by_class_total': by_class_total,
-            'results': results[:20],
+            'results': [{k: v for k, v in row.items() if k not in ('detections', 'quality_evaluation')}
+                        for row in results[:20]],
             'has_more': len(results) > 20,
             'total_results': total_images,
         }
@@ -1477,7 +1486,7 @@ class AgentExecutorV2:
             'summary': summary,
         }
 
-    def _tool_batch_defect_distribution(self, _ctx: TaskContext = None, **kwargs) -> Dict:
+    def _tool_batch_defect_distribution(self, _ctx: TaskContext = None, target_class: str = '', **kwargs) -> Dict:
         """工具：批次缺陷分布统计（基于已有批量检测结果）"""
         batch_results = getattr(_ctx, 'batch_results', None)
         if not batch_results:
@@ -1491,6 +1500,14 @@ class AgentExecutorV2:
         # 注意：batch_results 中只有每张图的总检测数和质量，没有按类别细分
         # 所以我们需要从 batch_detect_folder 返回的 by_class_total 获取
         by_class_total = getattr(_ctx, 'batch_by_class', {})
+        if target_class:
+            count = by_class_total.get(target_class, 0)
+            return {
+                'target_class': target_class,
+                'total_detections': count,
+                'summary': f'子集范围（仅{_get_class_cn(target_class)}）：共 {count} 个检测框。'
+            }
+
         total_detections = sum(by_class_total.values())
 
         # 如果没有缓存的 by_class，说明结果可能来自旧版，重新估算
@@ -1984,7 +2001,7 @@ class AgentExecutorV2:
         need_batch = ctx_has_folder and (
             has_detect_kw or has_count_kw or has_quality_kw
             or has_area_kw or has_conf_kw or has_detail_kw
-            or has_report_kw or has_batch_kw
+            or has_report_kw or has_batch_kw or has_full_kw
         )
 
         if has_batch_kw or need_batch:
@@ -1994,6 +2011,13 @@ class AgentExecutorV2:
                 if not has_batch_results:
                     plan.append(('batch_detect_folder', {'folder_path': folder}))
 
+                if target_class and has_full_kw and '只看' in text:
+                    plan.extend([
+                        ('batch_defect_distribution', {'target_class': target_class}),
+                        ('batch_quality_stats', {}),
+                    ])
+                    return plan
+
                 # 根据用户意图添加针对性的批量分析工具
                 # 1. 质量/不合格类问题 → 质量统计
                 added_quality = False
@@ -2002,7 +2026,9 @@ class AgentExecutorV2:
                     added_quality = True
                     # 如果明确问"哪些不合格"或具体哪些图片，列出不合格图片
                     if any(kw in text for kw in ['哪些', '哪张', '列表', '列出', '明细', '具体', '都是谁']):
-                        plan.append(('batch_list_failed', {'quality_filter': 'FAIL', 'limit': 20}))
+                        plan.append(('batch_list_failed', {
+                            'quality_filter': 'REVIEW' if '待复核' in text else 'FAIL', 'limit': 20
+                        }))
                     elif any(kw in text for kw in ['待复核', 'review']):
                         plan.append(('batch_list_failed', {'quality_filter': 'REVIEW', 'limit': 20}))
 

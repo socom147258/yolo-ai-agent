@@ -19,6 +19,8 @@ import io
 import tempfile
 from html import escape
 from pathlib import Path
+from shutil import copyfile
+from PIL import Image, ImageDraw
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -48,6 +50,9 @@ def render_agent_v2_page(agent_v2: AgentExecutorV2, db_path: str,
     st.markdown('<div class="main-header">智检 Agent · 钢材表面质检</div>', unsafe_allow_html=True)
 
     st.caption("上传钢材图像，交给 Agent 检测、判断并生成质检报告。每一步可在执行轨迹查看。")
+
+    st.button("一键演示质检", type="primary", on_click=_start_demo,
+              help="检测两张钢材样例、一张模拟低质量图和一个损坏文件。")
 
     # 顶部状态栏
     _render_status_bar(agent_v2)
@@ -200,6 +205,20 @@ def _render_scope_panel(agent: AgentExecutorV2):
             st.rerun()
 
 
+def _start_demo():
+    directory = Path(tempfile.mkdtemp(prefix='steel_demo_'))
+    samples = Path(__file__).resolve().parents[1] / 'sample_images'
+    for name in ('crazing_0001.jpg', 'scratches_0001.jpg'):
+        copyfile(samples / name, directory / name)
+    Image.new('RGB', (200, 200), (128, 128, 128)).save(directory / '模拟低质量图.jpg')
+    (directory / '模拟损坏文件.jpg').write_bytes(b'Invalid image demo')
+    st.session_state['v2_demo_folder'] = str(directory)
+    st.session_state['v2_input_mode'] = '文件夹批量'
+    st.session_state['v2_batch_input_type'] = '答辩演示'
+    _set_inspection_input(folder_path=str(directory))
+    st.session_state['v2_pending_cmd'] = '批量检测，列出待复核图片并说明判定原因，生成批次报告'
+
+
 def _set_inspection_input(image_path=None, folder_path=None):
     """仅在检测对象发生变化时清理已有证据。"""
     state = st.session_state
@@ -254,6 +273,8 @@ def _render_input_panel(agent: AgentExecutorV2):
     else:
         # 批量模式：三种输入方式
         batch_modes = ["📤 上传多张图片", "🎯 使用内置示例图片"]
+        if st.session_state.get('v2_demo_folder'):
+            batch_modes.append('答辩演示')
         if os.environ.get('ALLOW_LOCAL_FOLDER') == '1':
             batch_modes.append("📂 本地文件夹路径")
         batch_input_type = st.radio(
@@ -264,7 +285,10 @@ def _render_input_panel(agent: AgentExecutorV2):
             horizontal=True,
         )
 
-        if batch_input_type == "📤 上传多张图片":
+        if batch_input_type == '答辩演示':
+            _set_inspection_input(folder_path=st.session_state['v2_demo_folder'])
+            st.caption("4 个输入，包括两张样例、一张模拟低质量图和一个损坏文件。")
+        elif batch_input_type == "📤 上传多张图片":
             uploaded_files = st.file_uploader(
                 "上传多张图片（按住 Ctrl 多选）",
                 type=['jpg', 'jpeg', 'png', 'bmp'],
@@ -376,6 +400,7 @@ def _render_input_panel(agent: AgentExecutorV2):
         ]
     else:
         quick_cmds = [
+            "只看裂纹，再判断整批",
             "批量检测文件夹",
             "统计合格率",
             "哪些不合格",
@@ -657,6 +682,8 @@ def _render_trace_panel():
     with col2:
         st.metric("总耗时", f"{trace.get('total_time_ms', 0):.0f}ms")
 
+    _render_detection_evidence(result)
+
     # 执行模式
     mode = trace.get('mode', 'unknown')
     mode_map = {
@@ -784,10 +811,72 @@ def _render_result_actions(agent: AgentExecutorV2, review_workflow: ReviewWorkfl
     with col3:
         st.markdown("**检测摘要**")
         ctx = result.get('context_snapshot', {})
-        det_count = ctx.get('detection_count', len(ctx.get('current_detections', [])))
+        batch = result.get('batch_results', [])
+        det_count = (sum(row['detection_count'] for row in batch) if batch
+                     else ctx.get('detection_count', 0))
         st.metric("缺陷数量", det_count)
         st.metric("执行步数", trace.get('total_steps', 0))
         st.metric("总耗时", f"{trace.get('total_time_ms', 0):.0f}ms")
+
+    _render_detection_evidence(result)
+
+
+def _render_detection_evidence(result):
+    batch = result.get('batch_results')
+    single = result.get('image_evidence')
+    if not batch and not single:
+        return
+
+    st.subheader("检测证据与判定依据")
+    if batch:
+        categories = ['全部类别', *CLASS_NAMES_CN]
+        focus = st.selectbox("检测框范围", categories, key='v2_evidence_class',
+                             format_func=lambda item: CLASS_NAMES_CN.get(item, item))
+        view = batch
+        if focus != '全部类别':
+            view = [row for row in batch if any(
+                item['cls_name'] == focus for item in row.get('detections', [])
+            )]
+            count = sum(item['cls_name'] == focus for row in view for item in row['detections'])
+            st.caption(f"子集：{CLASS_NAMES_CN[focus]}，{len(view)} 张图、{count} 个检测框。"
+                       f"整批判定范围：{len(batch)} 个输入。")
+        if not view:
+            st.info("当前类别没有可查看的检测框。")
+            return
+        selected = st.selectbox(
+            "查看图片与判定依据", list(range(len(view))),
+            format_func=lambda idx: f"{view[idx]['image_name']} · {view[idx]['quality']}",
+        )
+        evidence = view[selected]
+        if evidence.get('quality') == 'ERROR':
+            st.warning("该文件读取或推理失败，已计入未完成。")
+            st.code(evidence.get('error', '检测失败'))
+            return
+        evaluation = evidence.get('quality_evaluation', {})
+        detections = [item for item in evidence.get('detections', [])
+                      if focus == '全部类别' or item['cls_name'] == focus]
+    else:
+        evidence = single['image']
+        evaluation = result.get('quality_evaluation', {})
+        detections = result.get('context_snapshot', {}).get('current_detections', single['detections'])
+
+    if evaluation:
+        st.caption(f"判定范围：{evaluation.get('scope_label', '单图全量')} · "
+                   f"规则：{evaluation['rule_id']} v{evaluation['rule_version']}")
+        st.text(evaluation['explanation'])
+    else:
+        st.caption("当前记录没有保存判定依据，请重新检测。")
+
+    path = evidence.get('image_path')
+    if path and Path(path).is_file():
+        with Image.open(path) as source:
+            annotated = source.convert('RGB')
+        draw = ImageDraw.Draw(annotated)
+        for item in detections:
+            box = (item['x1'], item['y1'], item['x2'], item['y2'])
+            draw.rectangle(box, outline='#ff9f43', width=2)
+            draw.text(box[:2], f"{item['cls_name']} {item['confidence']:.2f}", fill='#ffffff', stroke_width=1)
+        st.image(annotated, caption=f"{evidence['image_name']} · {len(detections)} 个检测框", width=360)
 
 
 def _generate_word_report(agent: AgentExecutorV2, result: Dict, trace: Dict):
