@@ -16,6 +16,9 @@ import streamlit as st
 import os
 import json
 import io
+import tempfile
+from html import escape
+from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -42,7 +45,9 @@ def render_agent_v2_page(agent_v2: AgentExecutorV2, db_path: str,
                          review_workflow: ReviewWorkflow):
     """渲染 Agent v2 页面（升级增强版）"""
 
-    st.markdown('<div class="main-header">🔬 质检 Agent v2（可追溯版）</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">智检 Agent · 钢材表面质检</div>', unsafe_allow_html=True)
+
+    st.caption("上传钢材图像，交给 Agent 检测、判断并生成质检报告。每一步可在执行轨迹查看。")
 
     # 顶部状态栏
     _render_status_bar(agent_v2)
@@ -195,6 +200,19 @@ def _render_scope_panel(agent: AgentExecutorV2):
             st.rerun()
 
 
+def _set_inspection_input(image_path=None, folder_path=None):
+    """仅在检测对象发生变化时清理已有证据。"""
+    state = st.session_state
+    if (state.get('v2_image_path'), state.get('v2_folder_path')) == (image_path, folder_path):
+        return
+    for key in ('v2_image_evidence', 'v2_batch_results', 'v2_batch_by_class',
+                'v2_batch_total_detections', 'v2_last_result', 'v2_last_trace',
+                'v2_context', 'v2_last_review_id', 'v2_report_requested', 'v2_report_download'):
+        state.pop(key, None)
+    state['v2_image_path'] = image_path
+    state['v2_folder_path'] = folder_path
+
+
 def _render_input_panel(agent: AgentExecutorV2):
     """左侧：上传和输入面板"""
     st.subheader("📁 输入")
@@ -218,33 +236,29 @@ def _render_input_panel(agent: AgentExecutorV2):
         )
 
         if uploaded is not None:
-            # 保存临时文件
-            tmp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "outputs", "temp")
-            os.makedirs(tmp_dir, exist_ok=True)
-            tmp_path = os.path.join(tmp_dir, f"v2_upload_{datetime.now().strftime('%H%M%S')}.png")
-            with open(tmp_path, "wb") as f:
-                f.write(uploaded.getbuffer())
-            st.session_state['v2_image_path'] = tmp_path
-            st.session_state['v2_image_name'] = uploaded.name
-            # 清除文件夹模式的状态
-            if 'v2_folder_path' in st.session_state:
-                del st.session_state['v2_folder_path']
-            # 清除批量检测结果
-            for key in ['v2_batch_results', 'v2_batch_by_class', 'v2_batch_total_detections']:
-                if key in st.session_state:
-                    del st.session_state[key]
+            if st.session_state.get('v2_single_upload_id') != uploaded.file_id:
+                suffix = Path(uploaded.name).suffix.lower()
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as image_file:
+                    image_file.write(uploaded.getbuffer())
+                st.session_state['v2_single_upload_id'] = uploaded.file_id
+                st.session_state['v2_uploaded_image_path'] = image_file.name
+            _set_inspection_input(image_path=st.session_state['v2_uploaded_image_path'])
+            st.session_state['v2_image_name'] = Path(uploaded.name).name
 
             st.image(uploaded, caption=uploaded.name, use_column_width=True)
             st.success("✅ 图像已上传")
         else:
-            if 'v2_image_path' in st.session_state:
-                st.info(f"已加载图像：{st.session_state.get('v2_image_name', '')}")
+            _set_inspection_input()
+            st.session_state.pop('v2_single_upload_id', None)
 
     else:
         # 批量模式：三种输入方式
+        batch_modes = ["📤 上传多张图片", "🎯 使用内置示例图片"]
+        if os.environ.get('ALLOW_LOCAL_FOLDER') == '1':
+            batch_modes.append("📂 本地文件夹路径")
         batch_input_type = st.radio(
             "批量输入方式",
-            options=["📤 上传多张图片", "🎯 使用内置示例图片", "📂 本地文件夹路径"],
+            options=batch_modes,
             index=0,
             key="v2_batch_input_type",
             horizontal=True,
@@ -260,32 +274,17 @@ def _render_input_panel(agent: AgentExecutorV2):
             )
 
             if uploaded_files and len(uploaded_files) > 0:
-                # 保存到临时文件夹
-                tmp_batch_dir = os.path.join(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                    "outputs", "temp",
-                    f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                )
-                os.makedirs(tmp_batch_dir, exist_ok=True)
+                upload_ids = tuple(uf.file_id for uf in uploaded_files)
+                if st.session_state.get('v2_batch_upload_ids') != upload_ids:
+                    directory = Path(tempfile.mkdtemp(prefix='steel_batch_'))
+                    for index, upload in enumerate(uploaded_files):
+                        filename = Path(upload.name.replace(chr(92), '/')).name
+                        (directory / f'{index + 1:03}_{filename}').write_bytes(upload.getbuffer())
+                    st.session_state['v2_batch_upload_ids'] = upload_ids
+                    st.session_state['v2_uploaded_batch_path'] = str(directory)
+                _set_inspection_input(folder_path=st.session_state['v2_uploaded_batch_path'])
+                saved_count = len(uploaded_files)
 
-                saved_count = 0
-                for uf in uploaded_files:
-                    save_path = os.path.join(tmp_batch_dir, uf.name)
-                    with open(save_path, "wb") as f:
-                        f.write(uf.getbuffer())
-                    saved_count += 1
-
-                st.session_state['v2_folder_path'] = tmp_batch_dir
-                # 清除单图状态
-                if 'v2_image_path' in st.session_state:
-                    del st.session_state['v2_image_path']
-                # 清除旧的批量检测结果
-                for key in ['v2_batch_results', 'v2_batch_by_class', 'v2_batch_total_detections']:
-                    if key in st.session_state:
-                        del st.session_state[key]
-
-                st.success(f"✅ 已上传 {saved_count} 张图片")
-                # 显示前几张预览
                 if saved_count <= 6:
                     cols = st.columns(min(saved_count, 3))
                     for i, uf in enumerate(uploaded_files[:6]):
@@ -294,10 +293,9 @@ def _render_input_panel(agent: AgentExecutorV2):
                     st.caption(f"共 {saved_count} 张图片，在对话框输入「批量检测」开始检测")
 
             else:
-                if st.session_state.get('v2_folder_path') and 'temp' in st.session_state.get('v2_folder_path', ''):
-                    st.info(f"已加载批量图片（上次上传）")
-                else:
-                    st.info("💡 上传图片后，在对话框输入「批量检测」即可开始")
+                _set_inspection_input()
+                st.session_state.pop('v2_batch_upload_ids', None)
+                st.info("上传多张图片后即可发起批量检测。")
 
         elif batch_input_type == "🎯 使用内置示例图片":
             sample_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sample_images")
@@ -325,13 +323,8 @@ def _render_input_panel(agent: AgentExecutorV2):
                     type_cols[i % 3].metric(name, f"{c} 张")
 
                 if st.button("🚀 使用此数据集开始检测", use_container_width=True, type="primary"):
-                    st.session_state['v2_folder_path'] = sample_dir
-                    if 'v2_image_path' in st.session_state:
-                        del st.session_state['v2_image_path']
-                    for key in ['v2_batch_results', 'v2_batch_by_class', 'v2_batch_total_detections']:
-                        if key in st.session_state:
-                            del st.session_state[key]
-                    st.success("✅ 已选择内置示例数据集，在对话框输入「批量检测」开始")
+                    _set_inspection_input(folder_path=sample_dir)
+                    st.session_state['v2_pending_cmd'] = '批量检测'
                     st.rerun()
 
                 if st.session_state.get('v2_folder_path') == sample_dir:
@@ -344,22 +337,14 @@ def _render_input_panel(agent: AgentExecutorV2):
             st.warning("⚠️ 此方式仅在本地部署时可用，云端部署无法读取本地文件夹")
             folder_path = st.text_input(
                 "📂 本地文件夹路径",
-                value=st.session_state.get('v2_folder_path', ''),
+                value=st.session_state.get('v2_folder_path') or '',
                 placeholder="例如：C:\\Users\\xxx\\data\\test_images",
                 key="v2_folder_input",
                 help="仅本地部署可用，云端部署请使用「上传多张图片」或「内置示例图片」"
             )
 
             if folder_path.strip():
-                st.session_state['v2_folder_path'] = folder_path.strip()
-                # 清除单图模式的状态
-                if 'v2_image_path' in st.session_state:
-                    del st.session_state['v2_image_path']
-                # 清除旧的批量检测结果（新文件夹需要重新检测）
-                for key in ['v2_batch_results', 'v2_batch_by_class', 'v2_batch_total_detections']:
-                    if key in st.session_state:
-                        del st.session_state[key]
-
+                _set_inspection_input(folder_path=folder_path.strip())
                 # 验证文件夹是否存在
                 if os.path.isdir(folder_path.strip()):
                     # 统计图片数量
@@ -371,6 +356,7 @@ def _render_input_panel(agent: AgentExecutorV2):
                 else:
                     st.error("❌ 文件夹不存在，请检查路径是否正确")
             else:
+                _set_inspection_input()
                 st.info("💡 输入文件夹路径后，在对话框输入「批量检测」即可开始")
 
     st.markdown("---")
@@ -386,6 +372,7 @@ def _render_input_panel(agent: AgentExecutorV2):
             "置信度分布如何",
             "当前规则是什么",
             "切回全量再判定",
+            "生成检测报告",
         ]
     else:
         quick_cmds = [
@@ -431,10 +418,10 @@ def _render_chat_panel(agent: AgentExecutorV2, review_workflow: ReviewWorkflow):
     # 显示对话
     for msg_idx, msg in enumerate(st.session_state['v2_chat_history']):
         if msg['role'] == 'user':
-            st.markdown(f'<div class="chat-user">👤 {msg["content"]}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="chat-user">👤 {escape(msg["content"])}</div>', unsafe_allow_html=True)
         else:
             content = msg.get('content', '')
-            st.markdown(f'<div class="chat-agent">🤖 {content.replace(chr(10), "<br>")}</div>',
+            st.markdown(f'<div class="chat-agent">🤖 {escape(content).replace(chr(10), "<br>")}</div>',
                        unsafe_allow_html=True)
 
             # 显示范围标签
@@ -450,6 +437,7 @@ def _render_chat_panel(agent: AgentExecutorV2, review_workflow: ReviewWorkflow):
                     'PASS': ('✅ PASS 合格', 'quality-pass'),
                     'REVIEW': ('⚠️ REVIEW 待复核', 'quality-review'),
                     'FAIL': ('❌ FAIL 不合格', 'quality-fail'),
+                    'INCOMPLETE': ('INCOMPLETE 未完成', 'quality-pending'),
                 }
                 label, cls = badges.get(quality, ('❓ 未知', 'quality-pending'))
                 st.markdown(
@@ -520,6 +508,7 @@ def _handle_user_input(agent: AgentExecutorV2, user_input: str,
                 batch_results=prev_batch_results,
                 batch_by_class=prev_batch_by_class,
                 batch_total_detections=prev_batch_total,
+                image_evidence=st.session_state.get('v2_image_evidence'),
             )
         except Exception as e:
             import traceback
@@ -534,10 +523,17 @@ def _handle_user_input(agent: AgentExecutorV2, user_input: str,
             st.rerun()
             return
 
+    if result.get('image_evidence'):
+        st.session_state['v2_image_evidence'] = result['image_evidence']
+
     # 保存轨迹和结果
     st.session_state['v2_last_trace'] = result['trace']
     st.session_state['v2_context'] = result['context_snapshot']
     st.session_state['v2_last_result'] = result
+    st.session_state.pop('v2_report_download', None)
+    st.session_state['v2_report_requested'] = any(
+        keyword in user_input for keyword in ('报告', '报表', '导出')
+    )
 
     # 保存批量检测结果（用于多轮对话复用）
     if 'batch_results' in result and result['batch_results']:
@@ -552,8 +548,7 @@ def _handle_user_input(agent: AgentExecutorV2, user_input: str,
     steps = trace.get('steps', [])
 
     # 提取质量判定
-    quality = ''
-    score = 0
+    quality = result.get('final_quality', '')
     for step in reversed(steps):
         if step.get('tool_name') == 'quality_judge' and step.get('status') == 'success':
             result_text = step.get('result_summary', '')
@@ -580,12 +575,12 @@ def _handle_user_input(agent: AgentExecutorV2, user_input: str,
         response_text += "\n\n" + method_notes
 
     # 自动创建复核任务（FAIL / REVIEW 时）
-    review_id = None
-    if quality in ('REVIEW', 'FAIL') and image_path:
+    review_id = st.session_state.get('v2_last_review_id')
+    if quality in ('REVIEW', 'FAIL') and image_path and not review_id:
         try:
             # 提取检测结果和评估结果
             detections = ctx.get('current_detections', [])
-            eval_result = _extract_eval_result(steps)
+            eval_result = result.get('quality_evaluation') or _extract_eval_result(steps)
 
             review_id = review_workflow.create_task(
                 task_id=result.get('task_id', ''),
@@ -748,7 +743,7 @@ def _render_result_actions(agent: AgentExecutorV2, review_workflow: ReviewWorkfl
             'REVIEW': '<span class="quality-badge quality-review">⚠️ REVIEW 待复核</span>',
             'FAIL': '<span class="quality-badge quality-fail">❌ FAIL 不合格</span>',
         }
-        badge_html = badges.get(quality, f'<span class="quality-badge quality-pending">{quality}</span>')
+        badge_html = badges.get(quality, f'<span class="quality-badge quality-pending">{escape(quality)}</span>')
         st.markdown(badge_html, unsafe_allow_html=True)
         st.caption(f"范围：{scope_label}")
 
@@ -762,9 +757,19 @@ def _render_result_actions(agent: AgentExecutorV2, review_workflow: ReviewWorkfl
     with col2:
         st.markdown("**操作**")
 
-        # 生成 Word 报告按钮
-        if st.button("📄 生成 Word 报告", use_container_width=True, type="primary"):
+        has_evidence = bool(result.get('image_evidence') or result.get('batch_results'))
+        generate_clicked = st.button(
+            "生成 Word 报告", use_container_width=True, type="primary", disabled=not has_evidence
+        )
+        if (generate_clicked or st.session_state.pop('v2_report_requested', False)) and has_evidence:
             _generate_word_report(agent, result, trace)
+        download = st.session_state.get('v2_report_download')
+        if download:
+            st.download_button(
+                "下载 Word 报告", data=download['data'], file_name=download['filename'],
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                on_click='ignore', use_container_width=True,
+            )
 
         # 查看复核任务
         review_id = st.session_state.get('v2_last_review_id')
@@ -808,23 +813,19 @@ def _generate_word_report(agent: AgentExecutorV2, result: Dict, trace: Dict):
         gen = QualityReportGenerator()
 
         # ===== 批量模式：生成批次报告 =====
-        if batch_results and '批次' in final_scope:
+        if batch_results:
             total_images = len(batch_results)
-            pass_count = sum(1 for r in batch_results if r.get('quality') == 'PASS')
-            review_count = sum(1 for r in batch_results if r.get('quality') == 'REVIEW')
-            fail_count = sum(1 for r in batch_results if r.get('quality') == 'FAIL')
-            total_detections = sum(r.get('detection_count', 0) for r in batch_results)
+            from models.agent.quality_semantics import batch_quality_from_individuals
 
-            # 确定批次整体质量
-            if fail_count > 0:
-                batch_quality = 'FAIL'
-                batch_reason = f'批次中有 {fail_count} 张不合格'
-            elif review_count > 0:
-                batch_quality = 'REVIEW'
-                batch_reason = f'批次中有 {review_count} 张待复核'
-            else:
-                batch_quality = 'PASS'
-                batch_reason = '所有图片均合格'
+            qualities = [r.get('quality', '') for r in batch_results]
+            pass_count = qualities.count('PASS')
+            review_count = qualities.count('REVIEW')
+            fail_count = qualities.count('FAIL')
+            completed = pass_count + review_count + fail_count
+            total_detections = sum(r.get('detection_count', 0) for r in batch_results)
+            batch_quality, batch_reason = batch_quality_from_individuals(
+                qualities, total_images, completed
+            )
 
             # 构建图像详情列表（适配报告生成器的字段）
             images_for_report = []
@@ -850,8 +851,8 @@ def _generate_word_report(agent: AgentExecutorV2, result: Dict, trace: Dict):
                 'rule_is_demo': ctx.get('rule_is_demo', True),
                 'summary': {
                     'planned': total_images,
-                    'success': total_images - sum(1 for r in batch_results if r.get('quality') == 'ERROR'),
-                    'failed': sum(1 for r in batch_results if r.get('quality') == 'ERROR'),
+                    'success': completed,
+                    'failed': total_images - completed,
                     'skipped': 0,
                     'pass': pass_count,
                     'fail': fail_count,
@@ -867,7 +868,7 @@ def _generate_word_report(agent: AgentExecutorV2, result: Dict, trace: Dict):
 
         # ===== 单图模式：生成单图报告 =====
         else:
-            quality_result = _extract_full_eval_result(trace)
+            quality_result = result.get('quality_evaluation') or _extract_full_eval_result(trace)
             image_name = ctx.get('image_name', st.session_state.get('v2_image_name', 'unknown'))
             is_subset = ctx.get('is_subset', False)
             subset_class = ctx.get('subset_class', '')
@@ -877,8 +878,8 @@ def _generate_word_report(agent: AgentExecutorV2, result: Dict, trace: Dict):
             by_class = {}
             total_conf = 0
             for d in detections:
-                cls_name = d.get('cls_name', d[0]) if isinstance(d, dict) else d[0]
-                conf = d.get('confidence', d[1]) if isinstance(d, dict) else d[1]
+                cls_name = d.get('cls_name', '') if isinstance(d, dict) else d[0]
+                conf = d.get('confidence', 0) if isinstance(d, dict) else d[1]
                 by_class[cls_name] = by_class.get(cls_name, 0) + 1
                 total_conf += conf
             avg_conf = total_conf / len(detections) if detections else 0
@@ -906,39 +907,7 @@ def _generate_word_report(agent: AgentExecutorV2, result: Dict, trace: Dict):
         gen.doc.save(buf)
         buf.seek(0)
 
-        st.success("✅ 报告生成成功！")
-        st.download_button(
-            label="📥 下载 Word 报告",
-            data=buf.getvalue(),
-            file_name=file_name,
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True,
-        )
-
-        # 内容验证
-        from models.agent.report_generator_v2 import _verify_report_content
-        tmp_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "outputs", "temp", f"report_verify_{datetime.now().strftime('%H%M%S')}.docx"
-        )
-        os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
-        with open(tmp_path, 'wb') as f:
-            f.write(buf.getvalue())
-
-        checks = _verify_report_content(tmp_path)
-        with st.expander("📋 报告内容验证"):
-            passed = sum(1 for v in checks.values() if v is True)
-            total = len(checks)
-            st.metric("验证通过项", f"{passed}/{total}")
-            for k, v in checks.items():
-                status = "✅" if v else "❌"
-                st.write(f"{status} {k}")
-
-        # 清理临时文件
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
+        st.session_state['v2_report_download'] = {'data': buf.getvalue(), 'filename': file_name}
 
     except ImportError as e:
         st.error(f"报告生成失败：缺少依赖 - {str(e)}")

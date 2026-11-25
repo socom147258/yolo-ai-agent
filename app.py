@@ -466,7 +466,7 @@ if st.sidebar.button("🚪 退出登录", key="logout_btn"):
 st.sidebar.markdown("---")
 page = st.sidebar.radio(
     "选择模块",
-    ["🔬 质检Agent v2", "🤖 AI Agent 对话", "🔍 智能检测",
+    ["🤖 智检 Agent 工作台", "旧版对话", "🔍 智能检测",
      "📊 数据分析", "⚙️ 质量规则", "🎨 GAN数据增强", "📋 报告中心", "📝 复核管理"],
     index=0,
 )
@@ -590,7 +590,7 @@ render_disclaimer_bar()
 # ============================================================
 # 模块0：质检 Agent v2（可追溯版）
 # ============================================================
-if page == "🔬 质检Agent v2":
+if page == "🤖 智检 Agent 工作台":
     import sys
     sys.path.insert(0, os.path.join(BASE_DIR, 'pages'))
 
@@ -608,7 +608,7 @@ if page == "🔬 质检Agent v2":
 # ============================================================
 # 模块1：AI Agent 对话
 # ============================================================
-elif page == "🤖 AI Agent 对话":
+elif page == "旧版对话":
     st.markdown('<div class="main-header">🤖 AI Agent 智能对话</div>', unsafe_allow_html=True)
     st.markdown("用自然语言下达检测任务，Agent 会自动理解意图、选择工具并执行。")
 
