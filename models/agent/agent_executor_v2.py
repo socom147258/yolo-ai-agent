@@ -21,11 +21,13 @@ import json
 from typing import Dict, List, Any, Optional, Callable
 from dataclasses import dataclass
 
+from dataclasses import asdict
 from .task_context import TaskContext, DetectionItem, ImageInfo
 from .tool_schema import (ToolSchema, ToolResult, ToolStatus,
                           get_tool_schema, list_tool_schemas)
 from .execution_trace import ExecutionTrace
 from .quality_engine_v2 import QualityEngineV2, QualityRuleSet
+from .quality_semantics import batch_quality_from_individuals
 from .llm_integration import (
     LLMAgentOrchestrator,
     create_llm_provider,
@@ -150,7 +152,8 @@ class AgentExecutorV2:
                  image_paths: List[str] = None, task_id: str = None,
                  folder_path: str = None, batch_results: List[Dict] = None,
                  batch_by_class: Dict[str, int] = None,
-                 batch_total_detections: int = None) -> Dict:
+                 batch_total_detections: int = None,
+                 image_evidence: Dict = None) -> Dict:
         """
         执行一个质检任务
 
@@ -175,6 +178,15 @@ class AgentExecutorV2:
         ctx.rule_snapshot = self.quality_engine.rule_set.to_dict()
         if folder_path:
             ctx.folder_path = folder_path
+
+        if image_path and image_evidence:
+            image = image_evidence['image']
+            if (image['image_path'] == image_path
+                    and image_evidence['model_version'] == ctx.model_version):
+                ctx.set_raw_detections(
+                    [DetectionItem(**item) for item in image_evidence['detections']],
+                    ImageInfo(**image),
+                )
 
         # 恢复已有批量检测结果（多轮对话复用）
         if batch_results:
@@ -208,12 +220,21 @@ class AgentExecutorV2:
 
         # 5. 批量模式：补充完整批量数据到结果中（用于多轮对话复用）
         if hasattr(ctx, 'batch_results') and ctx.batch_results:
+            result['final_quality'] = self._tool_batch_quality_stats(_ctx=ctx)['batch_quality']
             result['batch_results'] = ctx.batch_results
             result['batch_folder'] = getattr(ctx, 'batch_folder', folder_path)
             if hasattr(ctx, 'batch_by_class'):
                 result['batch_by_class'] = ctx.batch_by_class
             if hasattr(ctx, 'batch_total_detections'):
                 result['batch_total_detections'] = ctx.batch_total_detections
+
+        if ctx.has_raw_detections and ctx.image and ctx.image.image_path == image_path:
+            result['quality_evaluation'] = self.quality_engine.evaluate(ctx)
+            result['image_evidence'] = {
+                'image': asdict(ctx.image),
+                'detections': [asdict(item) for item in ctx.get_raw_detections()],
+                'model_version': ctx.model_version,
+            }
 
         return result
 
@@ -637,7 +658,11 @@ class AgentExecutorV2:
                     final_quality = 'PASS'
                 break
 
-        conclusion = f"质检结论：{final_quality}（{final_scope}）"
+        parts = [step.result_summary or step.error for step in trace.steps
+                 if step.result_summary or step.error]
+        if final_quality in ('PASS', 'REVIEW', 'FAIL'):
+            parts.append(self.quality_engine.evaluate(ctx)['explanation'])
+        conclusion = '\n\n'.join(parts) or '请上传质检图像，或选择内置样例。'
         trace.mark_finished(conclusion, final_scope)
 
         return {
@@ -649,6 +674,7 @@ class AgentExecutorV2:
             'final_conclusion': conclusion,
             'final_scope': final_scope,
             'detections': ctx.get_current_detections(),
+            'final_quality': final_quality,
         }
 
     # ==================== 工具执行 ====================
@@ -690,11 +716,16 @@ class AgentExecutorV2:
                 params['_trace'] = trace
 
                 tool_data = impl(**params)
+                if (tool_name == 'detect_image' and isinstance(tool_data, dict)
+                        and tool_data.get('status') == 'error'):
+                    ctx.detection_errors.append(tool_data.get('message', '检测失败'))
                 exec_ms = (time.time() - t0) * 1000
 
                 if isinstance(tool_data, ToolResult):
                     result = tool_data
                     result.execution_time_ms = exec_ms
+                elif isinstance(tool_data, dict) and tool_data.get('status') == 'error':
+                    result = ToolResult.error(tool_name, tool_data.get('message', '工具执行失败'))
                 elif isinstance(tool_data, dict):
                     result = ToolResult.success(tool_name, tool_data, exec_ms)
                 else:
@@ -805,21 +836,24 @@ class AgentExecutorV2:
                                      iou=iou_threshold, verbose=False)
         inference_ms = (time.time() - t0) * 1000
 
+        if not results or results[0].boxes is None:
+            message = "检测模型未返回有效的检测结果"
+            _ctx.detection_errors.append(message)
+            raise RuntimeError(message)
+
         detections = []
-        if results and len(results) > 0:
-            r = results[0]
-            if r.boxes is not None:
-                class_names = r.names if hasattr(r, 'names') else {}
-                for box in r.boxes:
-                    cls_idx = int(box.cls[0].item())
-                    cls_name = class_names.get(cls_idx, str(cls_idx))
-                    conf = float(box.conf[0].item())
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
-                    detections.append(DetectionItem(
-                        cls_name=cls_name, confidence=round(conf, 4),
-                        x1=round(x1, 1), y1=round(y1, 1),
-                        x2=round(x2, 1), y2=round(y2, 1),
-                    ))
+        r = results[0]
+        class_names = r.names if hasattr(r, 'names') else {}
+        for box in r.boxes:
+            cls_idx = int(box.cls[0].item())
+            cls_name = class_names.get(cls_idx, str(cls_idx))
+            conf = float(box.conf[0].item())
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            detections.append(DetectionItem(
+                cls_name=cls_name, confidence=round(conf, 4),
+                x1=round(x1, 1), y1=round(y1, 1),
+                x2=round(x2, 1), y2=round(y2, 1),
+            ))
 
         # 设置到上下文
         img_info = ImageInfo(
@@ -830,6 +864,7 @@ class AgentExecutorV2:
             image_path=image_path,
         )
         _ctx.set_raw_detections(detections, img_info)
+        self._tool_image_quality_check(image_path, _ctx=_ctx)
 
         return {
             'total_count': len(detections),
@@ -1026,8 +1061,8 @@ class AgentExecutorV2:
         from PIL import Image as PILImage
 
         try:
-            img = PILImage.open(image_path)
-            img_gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY) if img.mode == 'RGB' else np.array(img)
+            with PILImage.open(image_path) as img:
+                img_gray = np.asarray(img.convert('L'))
 
             # Laplacian 方差衡量清晰度
             laplacian_var = cv2.Laplacian(img_gray, cv2.CV_64F).var()
@@ -1057,6 +1092,9 @@ class AgentExecutorV2:
                 'is_usable': overall >= 0.5,
             }
         except Exception as e:
+            if _ctx.image:
+                _ctx.image.quality_score = 0
+                _ctx.image.quality_issues = [f'评估失败: {e}']
             return {
                 'quality_score': 0,
                 'issues': [f'评估失败: {e}'],
@@ -1309,29 +1347,14 @@ class AgentExecutorV2:
             # 从缓存中构建返回值
             by_class = getattr(_ctx, 'batch_by_class', {})
             total_det = getattr(_ctx, 'batch_total_detections', sum(by_class.values()))
-            pass_count = sum(1 for r in cached_results if r.get('quality') == 'PASS')
-            review_count = sum(1 for r in cached_results if r.get('quality') == 'REVIEW')
-            fail_count = sum(1 for r in cached_results if r.get('quality') == 'FAIL')
-            total = len(cached_results)
-            pass_rate = (pass_count / total * 100) if total > 0 else 0
-            summary = (
-                f'批量检测完成：共 {total} 张图片，检测到 {total_det} 个缺陷\n'
-                f'质量分布：✅ 合格 {pass_count} 张（{pass_rate:.1f}%）| '
-                f'⚠️ 待复核 {review_count} 张 | ❌ 不合格 {fail_count} 张'
-            )
             return {
+                **self._tool_batch_quality_stats(_ctx=_ctx),
                 'folder_path': folder_path,
-                'total_images': total,
                 'total_detections': total_det,
                 'by_class_total': by_class,
-                'pass_count': pass_count,
-                'review_count': review_count,
-                'fail_count': fail_count,
-                'pass_rate': round(pass_rate, 1),
                 'results': cached_results[:20],
                 'has_more': len(cached_results) > 20,
                 'total_results': len(cached_results),
-                'summary': summary,
                 'cached': True,
             }
 
@@ -1359,71 +1382,26 @@ class AgentExecutorV2:
         results = []
         total_detections = 0
         by_class_total = {}
-        pass_count = 0
-        review_count = 0
-        fail_count = 0
-
-        from PIL import Image as PILImage
-        import time
 
         for img_path in image_files:
             try:
-                # 获取图像尺寸
-                with PILImage.open(img_path) as img:
-                    orig_w, orig_h = img.size
+                image_ctx = TaskContext()
+                detection = self._tool_detect_image(img_path, _ctx=image_ctx)
+                detections = image_ctx.get_raw_detections()
+                eval_result = self.quality_engine.evaluate(image_ctx, scope='full')
+                total_detections += len(detections)
+                for item in detections:
+                    by_class_total[item.cls_name] = by_class_total.get(item.cls_name, 0) + 1
 
-                # 运行检测
-                t0 = time.time()
-                det_results = self.model.predict(source=img_path, conf=0.25,
-                                                 iou=0.45, verbose=False)
-                inference_ms = (time.time() - t0) * 1000
-
-                detections_list = []  # 列表格式: [cls_name, conf, x1, y1, x2, y2]
-                if det_results and len(det_results) > 0:
-                    r = det_results[0]
-                    if r.boxes is not None:
-                        class_names = r.names if hasattr(r, 'names') else {}
-                        for box in r.boxes:
-                            cls_idx = int(box.cls[0].item())
-                            cls_name = class_names.get(cls_idx, str(cls_idx))
-                            conf = float(box.conf[0].item())
-                            x1, y1, x2, y2 = box.xyxy[0].tolist()
-                            detections_list.append([
-                                cls_name, round(conf, 4),
-                                round(x1, 1), round(y1, 1),
-                                round(x2, 1), round(y2, 1),
-                            ])
-
-                total_detections += len(detections_list)
-
-                # 统计类别
-                for det in detections_list:
-                    cls_name = det[0]
-                    by_class_total[cls_name] = by_class_total.get(cls_name, 0) + 1
-
-                # 质量判定（使用底层规则引擎，接受列表格式的detections）
-                from models.agent.detection_agent import QualityRuleEngine as SimpleRuleEngine
-                simple_engine = SimpleRuleEngine()
-                eval_result = simple_engine.evaluate(
-                    detections_list,
-                    img_width=orig_w,
-                    img_height=orig_h,
-                )
                 quality = eval_result.get('quality', 'UNKNOWN')
-                if quality == 'PASS':
-                    pass_count += 1
-                elif quality == 'REVIEW':
-                    review_count += 1
-                else:
-                    fail_count += 1
-
                 results.append({
                     'image_name': os.path.basename(img_path),
                     'image_path': img_path,
-                    'detection_count': len(detections_list),
+                    'detection_count': len(detections),
                     'quality': quality,
                     'score': eval_result.get('score', 0),
-                    'inference_time_ms': round(inference_ms, 1),
+                    'inference_time_ms': detection['inference_time_ms'],
+                    'reasons_review': eval_result.get('reasons_review', []),
                 })
             except Exception as e:
                 results.append({
@@ -1435,33 +1413,20 @@ class AgentExecutorV2:
                 })
 
         total_images = len(image_files)
-        pass_rate = (pass_count / total_images * 100) if total_images > 0 else 0
-
         # 将批量结果存入 context 供后续工具使用
         _ctx.batch_results = results
         _ctx.batch_folder = folder_path
         _ctx.batch_by_class = by_class_total
         _ctx.batch_total_detections = total_detections
 
-        summary = (
-            f'批量检测完成：共 {total_images} 张图片，检测到 {total_detections} 个缺陷\n'
-            f'质量分布：✅ 合格 {pass_count} 张（{pass_rate:.1f}%）| '
-            f'⚠️ 待复核 {review_count} 张 | ❌ 不合格 {fail_count} 张'
-        )
-
         return {
+            **self._tool_batch_quality_stats(_ctx=_ctx),
             'folder_path': folder_path,
-            'total_images': total_images,
             'total_detections': total_detections,
             'by_class_total': by_class_total,
-            'pass_count': pass_count,
-            'review_count': review_count,
-            'fail_count': fail_count,
-            'pass_rate': round(pass_rate, 1),
-            'results': results[:20],  # 只返回前20条详情，避免太多
+            'results': results[:20],
             'has_more': len(results) > 20,
-            'total_results': len(results),
-            'summary': summary,
+            'total_results': total_images,
         }
 
     def _tool_batch_quality_stats(self, _ctx: TaskContext = None, **kwargs) -> Dict:
@@ -1479,6 +1444,12 @@ class AgentExecutorV2:
         review_count = sum(1 for r in batch_results if r.get('quality') == 'REVIEW')
         fail_count = sum(1 for r in batch_results if r.get('quality') == 'FAIL')
 
+        completed = pass_count + review_count + fail_count
+        error_count = total - completed
+        batch_quality, batch_reason = batch_quality_from_individuals(
+            [r.get('quality', '') for r in batch_results], total, completed
+        )
+
         pass_rate = (pass_count / total * 100) if total > 0 else 0
         review_rate = (review_count / total * 100) if total > 0 else 0
         fail_rate = (fail_count / total * 100) if total > 0 else 0
@@ -1490,8 +1461,13 @@ class AgentExecutorV2:
             f'  ❌ 不合格：{fail_count} 张（{fail_rate:.1f}%）'
         )
 
+        summary += f'\n  检测失败或未完成：{error_count} 张\n批次结论：{batch_quality}。{batch_reason}'
+
         return {
             'total_images': total,
+            'error_count': error_count,
+            'batch_quality': batch_quality,
+            'batch_quality_reason': batch_reason,
             'pass_count': pass_count,
             'review_count': review_count,
             'fail_count': fail_count,
